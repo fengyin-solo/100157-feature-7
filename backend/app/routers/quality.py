@@ -6,7 +6,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 
 from app.schemas import ActionResult, EntryPayload, PageResult
-from app.services.quality import QualityService
+from app.services.quality import VERDICTS, QualityService
 
 router = APIRouter(prefix="/api/quality", tags=["数据质控"])
 
@@ -20,14 +20,19 @@ STATUSES = ["待执行", "执行中", "已完成", "已退回"]
 def list_entries(
     keyword: str | None = Query(default=None, description="按质控编号检索"),
     status: str | None = Query(default=None, description="待执行、执行中、已完成、已退回"),
+    verdict: str | None = Query(default=None, description="疑误率判定：偏高、偏低、正常、未判定"),
     page: int = 1,
     size: int = 20,
 ) -> PageResult[dict]:
-    """按质控编号与状态过滤数据质控列表；没有数据时返回空页，不报错。"""
+    """按质控编号、状态与疑误率判定过滤数据质控列表；没有数据时返回空页，不报错。"""
     if size > 200:
         raise HTTPException(status_code=400, detail="每页最多 200 条，请缩小分页范围")
-    items, total = service.list_entries(keyword=keyword, status=status, page=page, size=size)
-    return PageResult(items=items, total=total, page=page, size=size)
+    if verdict is not None and verdict not in VERDICTS:
+        raise HTTPException(status_code=400, detail=f"判定条件「{verdict}」不在可选范围：{'、'.join(VERDICTS)}")
+    items, total, summary = service.list_entries(
+        keyword=keyword, status=status, verdict=verdict, page=page, size=size
+    )
+    return PageResult(items=items, total=total, page=page, size=size, summary=summary)
 
 
 @router.get("/{entry_id}", response_model=dict)
@@ -61,5 +66,5 @@ def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
 @router.get("/export")
 def export_entries() -> dict[str, Any]:
     """导出数据质控清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
+    items, total, _summary = service.list_entries(page=1, size=10000)
     return {"module": "quality", "total": total, "items": items}
