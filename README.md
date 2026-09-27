@@ -74,3 +74,6 @@ npm run dev
   `backend/app/routers/<模块>.py`，业务规则在 `backend/app/services/<模块>.py`。
 - 列表接口统一返回 `{ items, total, page, size }`，动作接口统一返回 `{ ok, message }`。
 - 状态流转只允许在 `app/services` 里改，路由层不做业务判断。
+- 数据质控的疑误率判定规则收在 `backend/app/services/quality.py`：疑误率 = 检出疑误数 ÷
+  涉及站点数，高于上限判为偏高、低于下限判为偏低；质控时段缺失或涉及站点数为零时不判定。
+  质控列表接口额外返回 `summary` 字段，给出当前筛选条件下偏高、偏低各多少条。

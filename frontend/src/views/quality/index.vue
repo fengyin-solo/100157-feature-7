@@ -3,7 +3,7 @@
     <header class="page-head">
       <div>
         <h2>数据质控管理</h2>
-        <p class="page-desc">维护质控任务，围绕质控编号、质控时段、涉及站点、质控规则做登记、筛选与状态流转。</p>
+        <p class="page-desc">维护质控任务，围绕质控编号、质控时段、涉及站点、质控规则做登记、筛选与状态流转；启动质控时按涉及站点数与检出疑误数算出疑误率，高于上限判为偏高、低于下限判为偏低。</p>
       </div>
       <div class="page-actions">
         <button class="btn primary" type="button" @click="openCreate">登记质控任务</button>
@@ -23,6 +23,13 @@
         <span>{{ field }}</span>
         <input v-model="filters[field]" :placeholder="`按${field}检索`" />
       </label>
+      <label class="filter-item">
+        <span>疑误率判定</span>
+        <select v-model="verdictFilter">
+          <option value="">全部判定</option>
+          <option v-for="verdict in verdicts" :key="verdict" :value="verdict">{{ verdict }}</option>
+        </select>
+      </label>
       <button class="btn" type="submit">查询</button>
       <button class="btn ghost" type="button" @click="resetFilters">重置条件</button>
     </form>
@@ -36,7 +43,12 @@
       </thead>
       <tbody>
         <tr v-for="row in rows" :key="String(row.id)">
-          <td v-for="column in columns" :key="column">{{ row[column] ?? '—' }}</td>
+          <td v-for="column in columns" :key="column">
+            <span v-if="column === '疑误率判定'" class="verdict-tag" :class="verdictClass(row[column])">
+              {{ row[column] ?? '未判定' }}
+            </span>
+            <template v-else>{{ formatCell(column, row[column]) }}</template>
+          </td>
           <td class="row-actions">
             <button
               v-for="action in actions"
@@ -57,6 +69,8 @@
 
     <footer class="page-foot">
       <span>共 {{ total }} 条数据质控记录</span>
+      <span>疑误率偏高 {{ summary['偏高'] ?? 0 }} 条 · 偏低 {{ summary['偏低'] ?? 0 }} 条</span>
+      <span v-if="noticeMessage" class="notice-text">{{ noticeMessage }}</span>
       <span v-if="errorMessage" class="error-text">{{ errorMessage }}</span>
     </footer>
   </section>
@@ -70,19 +84,46 @@ import { request } from '@/api/client'
 type Row = Record<string, string | number | null>
 
 const ENDPOINT = '/api/quality'
-const columns = ["质控编号", "质控时段", "涉及站点", "质控规则", "检出疑误数", "质控人员", "质控日期", "质控状态"]
+const columns = ["质控编号", "质控时段", "涉及站点", "质控规则", "检出疑误数", "疑误率", "疑误率判定", "质控人员", "质控日期", "质控状态"]
 const actions = ["启动质控", "确认完成", "退回重做"]
 const statuses = ["待执行", "执行中", "已完成", "已退回"]
+const verdicts = ["偏高", "偏低", "正常", "未判定"]
 const stats = [{"label": "待执行质控", "value": 0}, {"label": "本月质控轮次", "value": 0}, {"label": "检出疑误数", "value": 0}]
 
 const rows = ref<Row[]>([])
 const total = ref(0)
+const summary = ref<Record<string, number>>({})
 const errorMessage = ref('')
+const noticeMessage = ref('')
 const filters = ref<Record<string, string>>({})
+const verdictFilter = ref('')
 const filterFields = columns.slice(0, 3)
+const filterParams: Record<string, string> = { '质控编号': 'keyword', '质控时段': 'period', '涉及站点': 'station' }
+
+function formatCell(column: string, value: string | number | null | undefined) {
+  if (value === null || value === undefined || value === '') {
+    return '—'
+  }
+  if (column === '疑误率') {
+    const rate = Number(value)
+    return Number.isFinite(rate) ? `${(rate * 100).toFixed(2)}%` : String(value)
+  }
+  return value
+}
+
+function verdictClass(value: string | number | null | undefined) {
+  if (value === '偏高') {
+    return 'verdict-high'
+  }
+  if (value === '偏低') {
+    return 'verdict-low'
+  }
+  return ''
+}
 
 function resetFilters() {
   filters.value = {}
+  verdictFilter.value = ''
   void reload()
 }
 
@@ -96,14 +137,18 @@ function openCreate() {
 
 async function runAction(action: string, row: Row) {
   errorMessage.value = ''
+  noticeMessage.value = ''
   try {
     const response = await request(`${ENDPOINT}/${row.id}/actions`, {
       method: 'POST',
-      body: JSON.stringify({ action }),
+      body: JSON.stringify({ values: { action } }),
     })
-    if (!response.ok) {
-      throw new Error('数据质控动作未生效，请稍后重试')
+    const payload = await response.json().catch(() => null)
+    if (!response.ok || !payload?.ok) {
+      const detail = payload?.message ?? payload?.detail
+      throw new Error(typeof detail === 'string' ? detail : '数据质控动作未生效，请稍后重试')
     }
+    noticeMessage.value = payload.message ?? `质控任务已${action}`
     await reload()
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '数据质控操作失败'
@@ -112,15 +157,25 @@ async function runAction(action: string, row: Row) {
 
 async function reload() {
   errorMessage.value = ''
-  const query = new URLSearchParams(filters.value as Record<string, string>).toString()
+  const params = new URLSearchParams()
+  for (const [field, param] of Object.entries(filterParams)) {
+    const value = (filters.value[field] ?? '').trim()
+    if (value) {
+      params.set(param, value)
+    }
+  }
+  if (verdictFilter.value) {
+    params.set('verdict', verdictFilter.value)
+  }
   try {
-    const response = await request(`${ENDPOINT}?${query}`)
+    const response = await request(`${ENDPOINT}?${params.toString()}`)
     if (!response.ok) {
       throw new Error('质控任务列表读取失败')
     }
     const payload = await response.json()
     rows.value = payload.items ?? []
     total.value = payload.total ?? rows.value.length
+    summary.value = payload.summary ?? {}
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '数据质控列表读取失败'
   }
